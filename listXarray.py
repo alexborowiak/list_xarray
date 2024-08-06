@@ -1,19 +1,37 @@
 import os
 import json
-
+from functools import partial
 import numpy as np
 import pandas as pd
 import xarray as xr
+import dask
 from typing import List, Callable, Union, Dict, Optional
 from numpy.typing import ArrayLike
 
 import utils
-import xarray_extender
 
 logger = utils.get_notebook_logger()
 
+
+# New args and kwargs
+#https://chatgpt.com/share/365d114b-8d27-4327-8e3c-2766cecb0ff5
+
+
+# from functools import wraps
+
+# def array_function(func):
+#     @wraps(func)
+#     def wrapper(*args, **kwargs):
+#         if isinstance(args[0], listXarray):
+#             return args[0].__array_function__(func, None, args, kwargs)
+#         else:
+#             return func(*args, **kwargs)
+#     return wrapper
+
 class listXarray():
-    def __init__(self, xr_list:List, key_dim:List[str]=None, refkeys:Optional[ArrayLike]=None, logginglevel:str='ERROR') -> None:
+    def __init__(
+        self, xr_list:List, key_dim:List[str]=None, refkeys:Optional[ArrayLike]=None, 
+        logginglevel:str='ERROR') -> None:
         """
         Initialize the listXarray object.
         Parameters:
@@ -44,6 +62,41 @@ class listXarray():
             self.refkeys = refkeys
             
         logger.info(self.refkeys)
+
+    @static
+    def __process_args(args, key):
+        new_args = args.copy()
+        for num, arg in enumerate(args):
+            # We have list xarray
+            if isinstance(arg, listXarray):
+                # Get the dataset out at the key
+                new_args[num] = arg[key]
+        return new_args
+
+    @static
+    def __process_kwargs(kwargs, key):
+        new_kwargs = kwargs.copy()
+        for num, (name, item) in enumerate(args.itmes()):
+            # We have list xarray
+            if isinstance(item, listXarray):
+                # Get the dataset out at the key
+                new_kwargs[name] = item[key]
+        return new_kwargs
+    
+    
+    def __call__(self, func, *args, **kwargs):
+        logginglevel = kwargs.get('logginglevel', "ERROR")
+        utils.change_logginglevel(logginglevel)
+        logger.info(f' - {func=} has been called')
+        to_return = []
+        for key, ds in self:
+            logger.debug(ds)
+            # IF there are any xrlist items, extract the vlaue at the key
+            new_args = _process_args(args, key)
+            new_kwargs = _process_args(kwargs, key)
+            ds_out = func(ds, *new_args, **new_kwargs)
+            to_return.append(ds_out)
+        return listXarray(to_return, self.key_dim, self.refkeys)
 
     def set_refkeys(self, key_dim, refkeys=None, logginglevel:str='ERROR'):
         """
@@ -139,6 +192,7 @@ class listXarray():
             string += str(da.sizes).replace('Frozen', '')
             string += '\n'
         return string
+
 
     def to_dict(self, logginglevel='ERROR') -> Dict:
         """
@@ -411,31 +465,41 @@ class listXarray():
                 new_xr_list.append(da1 / da2)                
         return listXarray(new_xr_list, self.key_dim)
     
-    def apply(self, func: Callable, *args, **kwargs) -> 'listXarray':
+    def apply(self, func: Callable, parallel=False, *args, **kwargs) -> 'listXarray':
         """
         Apply a function to each DataArray in the list and create a new listXarray.
-
+    
         Parameters:
             func (Callable): The function to apply to each DataArray.
+            parallel (Bool): If the function will use dask delayed or not
             *args: Additional positional arguments for the function.
             **kwargs: Additional keyword arguments for the function.
         Returns:
             listXarray: A new listXarray with the results of the function applied to each DataArray.
         """
+    
+        debug = kwargs.get('debug', False)
+        key_dim =  self.key_dim
+        print(key_dim)
         
-        if 'debug' in kwargs:
-            debug = kwargs['debug']
-            del kwargs['debug']
-        else:
-            debug=False
-            
+        if parallel: 
+            func = dask.delayed(func)
+    
         to_return = []
         for da in self.xr_list:
             to_append = func(da, *args, **kwargs)
-            if debug: print(to_append)
+            if debug: 
+                print(to_append)
             to_return.append(to_append)
-        if debug: return to_return
-        return listXarray(to_return, self.key_dim)
+    
+        if parallel: 
+            to_return = dask.compute(*to_return)
+    
+        if debug: 
+            return to_return
+    
+        return listXarray(to_return, key_dim)
+
         
     
     def reduce(self, func: Callable, *args, **kwargs) -> 'listXarray':
@@ -640,10 +704,31 @@ class listXarray():
         new_xr_list = []
         for ds in self.xr_list:
             try: ds = ds.isel(**kwargs)
-            except (ValueError, KeyError): ds = ds # Sometime there may be a dim that is not with the other datasets
+            except (ValueError, KeyError): ds = ds 
+                # Sometime there may be a dim that is not with the other datasets
             new_xr_list.append(ds)
         
         return listXarray(new_xr_list, self.key_dim)
+
+
+    def sel(self, **kwargs):
+        """
+        Index each DataArray in the list along specified dimensions.
+
+        Parameters:
+            **kwargs: Keyword arguments to be passed to the `isel` method of each DataArray.
+        Returns:
+            listXarray: A new listXarray with the indexed DataArrays.
+        """
+        new_xr_list = []
+        for ds in self.xr_list:
+            try: ds = ds.sel(**kwargs)
+            except (ValueError, KeyError): ds = ds 
+                # Sometime there may be a dim that is not with the other datasets
+            new_xr_list.append(ds)
+        
+        return listXarray(new_xr_list, self.key_dim)
+        
     def compute(self):
         '''
         Loads all Datsets into memory
@@ -794,36 +879,51 @@ class listXarray():
 
         return listXarray(new_xr_list, self.key_dim)
             
-    def regrid(self, target_key: str, method: str) -> List[xr.DataArray]:
+    def regrid(self, target_key: str=None, target_grid:xr.DataArray=None, method: str='bilinear',
+              regrid_package='climtas') -> List[xr.DataArray]:
         """
         Regrids the DataArrays in the object to a common target grid.
 
         Parameters:
             target_key (str): The key of the DataArray to which all other DataArrays will be regridded.
             method (str): The regridding method to be used. Should be one of the supported methods by xESMF.
-
+            target_grid (xr.DataArray): Data array to regrid to.
         Returns:
             List[xarray.DataArray]: A list of regridded DataArrays, including the target grid DataArray.
         """
-        from xesmf import Regridder
+        if regrid_package == 'xesmf':
+            from xesmf import Regridder
+            regrid_func = partial(Regridder, method=method)
+            
+        elif regrid_package == 'climtas':
+            import climtas
+            regrid_func = climtas.regrid.Regridder
 
-        if target_key not in self.refkeys:
-            raise TypeError(f'target_key must be in {self.refkeys} ({target_key=})')
-
-        target_grid = self[target_key]
+        if target_key is not None:
+            if target_key not in self.refkeys:
+                raise TypeError(f'target_key must be in {self.refkeys} ({target_key=})')
+            target_grid = self[target_key]
         regridded_data_arrays = []
 
         for refkey in self.refkeys:
-            if refkey == target_key:
+            if refkey == target_key and target_key is not None:
                 continue
             else:
                 ds = self[refkey]
-                regridder = Regridder(ds, target_grid, method=method)
+                regridder = regrid_func(ds, target_grid)
+                if regrid_package == 'climtas': regridder = regridder.regrid
                 regridded_ds = regridder(ds)
+
+                # Sometimes the re-gridd will remove the coordinates from the array
+                # if list(regridded_ds.indexes)
+                coord_dict = dict(lat=regridded_ds.lat.values, lon=regridded_ds.lon.values)
+
+                regridded_ds=regridded_ds.assign_coords(coord_dict)
+                
                 regridded_data_arrays.append(regridded_ds)
 
         # Add the target grid DataArray to the list of regridded DataArrays
-        regridded_data_arrays.insert(0, target_grid)
+        if target_key is not None:regridded_data_arrays.insert(0, target_grid)
 
         return listXarray(regridded_data_arrays)
     
@@ -865,7 +965,8 @@ class listXarray():
         """
         utils.change_logginglevel(logginglevel)
         if self.key_dim is None:
-            raise ValueError("Key dimension is not specified. Please provide a key dimension before saving the data.")
+            raise ValueError(
+                "Key dimension is not specified. Please provide a key dimension before saving the data.")
 
         try:
             os.mkdir(fname)  # Create the directory if it doesn't exist
@@ -878,20 +979,20 @@ class listXarray():
         name_file_tup_list = list(zip(individual_fnames, self.xr_list))
 
         # Remove the files that have already been saved
-        if force: name_file_tup_list = [tup for tup in name_file_tup_list if f'{tup[0]}.nc' not in os.listdir(fname)]
+        if force: 
+            name_file_tup_list = [tup for tup in name_file_tup_list if f'{tup[0]}.nc' not in os.listdir(fname)]
         logger.debug(list(map(lambda x: x[0], name_file_tup_list)))
 
 
         # Save key dimension information in a JSON file within the specified directory
-        key_dim_info = {
-            'key_dim_name': self.key_dim,
-            'datasets': individual_fnames
-        }
+        key_dim_info = { 'key_dim_name': self.key_dim, 'datasets': individual_fnames }
         json_file_path = os.path.join(fname, 'key_dim_info.json')
         # If we are not forcing and the path does not exists
         # Dont run if: we are forcing and the path exists 
         logger.debug(f'{force=}    path_extist = {os.path.exists(json_file_path)}')
-        if not force or not os.path.exists(json_file_path): # If we are forcing, we don't need to create this file again and again
+        # If we are forcing, we don't need to create this file again and again
+        if not force or not os.path.exists(json_file_path): 
+            
             logger.info('Creating key_dim_info json file')
             if os.path.exists(json_file_path): os.remove(json_file_path)
             
