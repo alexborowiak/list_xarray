@@ -28,10 +28,8 @@ logger = utils.get_notebook_logger()
 #             return func(*args, **kwargs)
 #     return wrapper
 
-class listXarray():
-    def __init__(
-        self, xr_list:List, key_dim:List[str]=None, refkeys:Optional[ArrayLike]=None, 
-        logginglevel:str='ERROR') -> None:
+class listXarray:
+    def __init__(self, xr_list: List, key_dim: List[str] = None, refkeys: Optional[ArrayLike] = None, logginglevel: str = 'ERROR') -> None:
         """
         Initialize the listXarray object.
         Parameters:
@@ -48,7 +46,7 @@ class listXarray():
         logger.info(self.key_dim)
         logger.debug(self.xr_list)
 
-        if refkeys is None: # Only try this if not manually setting refkeys
+        if refkeys is None:  # Only try this if not manually setting refkeys
             if key_dim:
                 try:
                     self.refkeys = np.array([ds[key_dim].values[0] for ds in xr_list])
@@ -63,39 +61,29 @@ class listXarray():
             
         logger.info(self.refkeys)
 
-    @static
-    def __process_args(args, key):
-        new_args = args.copy()
-        for num, arg in enumerate(args):
-            # We have list xarray
-            if isinstance(arg, listXarray):
-                # Get the dataset out at the key
-                new_args[num] = arg[key]
-        return new_args
 
-    @static
-    def __process_kwargs(kwargs, key):
-        new_kwargs = kwargs.copy()
-        for num, (name, item) in enumerate(args.itmes()):
-            # We have list xarray
-            if isinstance(item, listXarray):
-                # Get the dataset out at the key
-                new_kwargs[name] = item[key]
-        return new_kwargs
-    
-    
+
     def __call__(self, func, *args, **kwargs):
         logginglevel = kwargs.get('logginglevel', "ERROR")
         utils.change_logginglevel(logginglevel)
-        logger.info(f' - {func=} has been called')
+        logger.info(f'{func} has been called')
+        parallel_call = kwargs.pop('parallel_call', False)
+        if parallel_call: 
+            logger.info(f'{parallel_call=}')
+            func = dask.delayed(func)
+        
         to_return = []
-        for key, ds in self:
+        for key, ds in zip(self.refkeys, self.xr_list):
+            logger.info(key)
             logger.debug(ds)
-            # IF there are any xrlist items, extract the vlaue at the key
-            new_args = _process_args(args, key)
-            new_kwargs = _process_args(kwargs, key)
+            # If there are any listXarray items, extract the value at the key
+            new_args = _process_args(args, key)  # Access via class name
+            new_kwargs = _process_kwargs(kwargs, key)  # Access via class name
+            logger.debug(new_args)
+            logger.debug(new_kwargs)
             ds_out = func(ds, *new_args, **new_kwargs)
             to_return.append(ds_out)
+        if parallel_call: to_return = dask.compute(*to_return)
         return listXarray(to_return, self.key_dim, self.refkeys)
 
     def set_refkeys(self, key_dim, refkeys=None, logginglevel:str='ERROR'):
@@ -184,11 +172,14 @@ class listXarray():
         print(active_key_dim)
         longest_key = np.max(list(map(len, self.refkeys)))
         for refkey, da in zip(self.refkeys, self.xr_list):
-            # if isinstance(da, (xr.Dataset, xr.DataArray)):
-            #     if 'model' in da.coords:
-            #         model_name = str(da.model.values)
-            #         string += model_name + (16-len(model_name)) * ' '
             string += refkey + (longest_key-len(refkey)) * ' '
+            
+            if isinstance(da, xr.DataArray):
+                string += ' (dataArray): '
+            else:
+                string += f' (dataSet : {list(da.data_vars)}): '
+     
+
             string += str(da.sizes).replace('Frozen', '')
             string += '\n'
         return string
@@ -279,6 +270,120 @@ class listXarray():
 
         ds = self.xr_list[arg]
         return ds
+
+
+    def sel(self, **kwargs):
+        """
+        Select each DataArray in the list along specified dimensions.
+        
+        If the selection dimension is the key dimension, filter the list.
+        Parameters:
+            **kwargs: Keyword arguments to be passed to the `sel` method of each DataArray.
+        Returns:
+            listXarray: A new listXarray with the selected DataArrays.
+        """
+        # Check if key_dim is in kwargs, handle separately if it is
+        if self.key_dim in kwargs:
+            key_selection = kwargs.pop(self.key_dim)
+
+            # Only getting a single one out
+            if isinstance(key_selection, (str, int)):
+                return self[key_selection]
+            else: # Likely means list has been passed
+
+                new_xr_list = []
+                for key in key_selection:
+                    new_xr_list.append(self[key])
+                    
+                return listXarray(new_xr_list, self.key_dim, key_selection)
+    
+
+        # Perform selection on each dataset
+        selected_xr_list = []
+        for ds in self.xr_list:
+            try:
+                selected_ds = ds.sel(**kwargs)
+            except (ValueError, KeyError):
+                selected_ds = ds  # Sometimes there may be a dim that is not with the other datasets
+            selected_xr_list.append(selected_ds)
+
+        return listXarray(selected_xr_list, self.key_dim, self.refkeys)
+
+    def isel(self, **kwargs):
+        """
+        Index each DataArray in the list along specified dimensions.
+        
+        If the index dimension is the key dimension, filter the list.
+        Parameters:
+            **kwargs: Keyword arguments to be passed to the `isel` method of each DataArray.
+        Returns:
+            listXarray: A new listXarray with the indexed DataArrays.
+        """
+        # Check if key_dim is in kwargs, handle separately if it is
+        if self.key_dim in kwargs:
+            key_selection = kwargs.pop(self.key_dim)
+
+            # Only getting a single one out
+            if isinstance(key_selection, (str, int)):
+                return self[key_selection]
+            else: # Likely means list has been passed
+
+                new_xr_list = []
+                new_refkeys = []
+                for num,key in enumerate(key_selection):
+                    new_xr_list.append(self[key])
+                    new_refkeys.append(self.refkeys[num])
+                    
+                return listXarray(new_xr_list, self.key_dim, new_refkeys)
+    
+        # Perform indexing on each dataset
+        indexed_xr_list = []
+        for ds in self.xr_list:
+            try:
+                indexed_ds = ds.isel(**kwargs)
+            except (ValueError, KeyError):
+                indexed_ds = ds  # Sometimes there may be a dim that is not with the other datasets
+            indexed_xr_list.append(indexed_ds)
+
+        return listXarray(indexed_xr_list, self.key_dim, self.refkeys)
+
+
+    def __getattr__(self, name):
+        """
+        Handle attribute access for dimensions or variables in the first xarray.Dataset.
+        Parameters:
+            name (str): The attribute name to access.
+        Returns:
+            The attribute from the first xarray.Dataset in self.xr_list.
+        """
+        if not self.xr_list:
+            raise AttributeError(f"{self.__class__.__name__} object has no attribute '{name}'")
+
+        first_ds = self.xr_list[0]
+
+        # Check if it's a dimension
+        if name in first_ds.dims:
+            # Get values from all datasets for this dimension
+            all_values = [ds[name].values for ds in self.xr_list]
+            # Check if all dimension values are the same
+            if all(np.array_equal(val, all_values[0]) for val in all_values):
+                return all_values[0]
+            else:
+                # Return a dictionary with key_dim as the key and the dimension values as the items
+                return {key: ds[name].values for key, ds in zip(self.refkeys, self.xr_list)}
+
+        # Check if it's a variable (only if first_ds is a Dataset)
+        if isinstance(first_ds, xr.Dataset):
+            if name in first_ds.data_vars:
+                return listXarray([ds[name] for ds in self.xr_list], self.key_dim, self.refkeys)
+        
+        # # Check if it's an attribute of the dataset
+        # if hasattr(first_ds, name):
+        #     return listXarray([getattr(ds, name) for ds in self.xr_list], self.key_dim, self.refkeys)
+
+        raise AttributeError(f"{self.__class__.__name__} object has no attribute '{name}'")
+
+
         
     def __setitem__(self, key, value):
         """
@@ -328,7 +433,8 @@ class listXarray():
     @staticmethod
     def __reconcile(self, other, func):
         """
-        Helper method to perform element-wise comparison or operation between elements of two listXarray instances.
+        Helper method to perform element-wise comparison or operation between elements of two
+        listXarray instances.
         Parameters:
             self (listXarray): The first listXarray instance.
             other (listXarray or float or int): The second listXarray instance or value.
@@ -351,7 +457,8 @@ class listXarray():
         Parameters:
             other (listXarray): Another listXarray instance.
         Returns:
-            listXarray: A new instance with boolean values indicating whether each element is less than the corresponding element in 'other'.
+            listXarray: A new instance with boolean values indicating whether each element is less
+            than the corresponding element in 'other'.
         """
         func = np.less
         return self.__reconcile(self, other, func)
@@ -362,7 +469,8 @@ class listXarray():
         Parameters:
             other (listXarray): Another listXarray instance.
         Returns:
-            listXarray: A new instance with boolean values indicating whether each element is greater than the corresponding element in 'other'.
+            listXarray: A new instance with boolean values indicating whether each element is greater
+            than the corresponding element in 'other'.
         """
         func = np.greater
         return self.__reconcile(self, other, func)
@@ -373,7 +481,8 @@ class listXarray():
         Parameters:
             other (listXarray): Another listXarray instance.
         Returns:
-            listXarray: A new instance with boolean values indicating whether each element is greater than or equal to the corresponding element in 'other'.
+            listXarray: A new instance with boolean values indicating whether each element is greater
+            than or equal to the corresponding element in 'other'.
         """
         func = np.greater_equal
         return self.__reconcile(self, other, func)
@@ -384,12 +493,44 @@ class listXarray():
         Parameters:
             other (listXarray): Another listXarray instance.
         Returns:
-            listXarray: A new instance with boolean values indicating whether each element is less than or equal to the corresponding element in 'other'.
+            listXarray: A new instance with boolean values indicating whether each element is less
+            than or equal to the corresponding element in 'other'.
         """
         func = np.less_equal
         return self.__reconcile(self, other, func)
     
-    
+    def __or__(self, other):
+        print('s')
+        if not isinstance(other, listXarray):
+            raise ValueError("Both operands must be listXarray instances")
+
+        new_xr_list = []
+        # Combine the xr_list and refkeys
+        for key in self.refkeys:
+            ds1 = self[key]
+            ds2 = other[key]
+            ds_new  = np.logical_or(ds1, ds2)
+            new_xr_list.append(ds_new)
+
+
+        # Return a new listXarray object
+        return listXarray(new_xr_list, self.key_dim, self.refkeys)
+
+    def __and__(self, other):
+        if not isinstance(other, listXarray):
+            raise ValueError("Both operands must be listXarray instances")
+
+        new_xr_list = []
+        # Combine the xr_list and refkeys
+        for key in self.refkeys:
+            ds1 = self[key]
+            ds2 = other[key]
+            ds_new  = np.logical_and(ds1, ds2)
+            new_xr_list.append(ds_new)
+
+
+        # Return a new listXarray object
+        return listXarray(new_xr_list, self.key_dim, self.refkeys)
     
     def __add__(self, other):
         """
@@ -671,8 +812,11 @@ class listXarray():
             reduced_list.append(ds_reduced)
             
         return listXarray(reduced_list, self.key_dim)
-    
     def mean(self, dim):
+        return self._apply_reduction(dim, reduction_func=lambda ds, dim: ds.mean(dim=dim))
+    def max(self, dim):
+        return self._apply_reduction(dim, reduction_func=lambda ds, dim: ds.mean(dim=dim))
+    def min(self, dim):
         return self._apply_reduction(dim, reduction_func=lambda ds, dim: ds.mean(dim=dim))
     
     def sum(self, dim):
@@ -691,43 +835,45 @@ class listXarray():
             listXarray: A new listXarray with missing values removed.
         """
         return listXarray([ds.dropna(dim=dim) for ds in self.xr_list], self.key_dim)
+
+
     
-    def isel(self, **kwargs):
-        """
-        Index each DataArray in the list along specified dimensions.
+    # def isel(self, **kwargs):
+    #     """
+    #     Index each DataArray in the list along specified dimensions.
 
-        Parameters:
-            **kwargs: Keyword arguments to be passed to the `isel` method of each DataArray.
-        Returns:
-            listXarray: A new listXarray with the indexed DataArrays.
-        """
-        new_xr_list = []
-        for ds in self.xr_list:
-            try: ds = ds.isel(**kwargs)
-            except (ValueError, KeyError): ds = ds 
-                # Sometime there may be a dim that is not with the other datasets
-            new_xr_list.append(ds)
+    #     Parameters:
+    #         **kwargs: Keyword arguments to be passed to the `isel` method of each DataArray.
+    #     Returns:
+    #         listXarray: A new listXarray with the indexed DataArrays.
+    #     """
+    #     new_xr_list = []
+    #     for ds in self.xr_list:
+    #         try: ds = ds.isel(**kwargs)
+    #         except (ValueError, KeyError): ds = ds 
+    #             # Sometime there may be a dim that is not with the other datasets
+    #         new_xr_list.append(ds)
         
-        return listXarray(new_xr_list, self.key_dim)
+    #     return listXarray(new_xr_list, self.key_dim)
 
 
-    def sel(self, **kwargs):
-        """
-        Index each DataArray in the list along specified dimensions.
+    # def sel(self, **kwargs):
+    #     """
+    #     Index each DataArray in the list along specified dimensions.
 
-        Parameters:
-            **kwargs: Keyword arguments to be passed to the `isel` method of each DataArray.
-        Returns:
-            listXarray: A new listXarray with the indexed DataArrays.
-        """
-        new_xr_list = []
-        for ds in self.xr_list:
-            try: ds = ds.sel(**kwargs)
-            except (ValueError, KeyError): ds = ds 
-                # Sometime there may be a dim that is not with the other datasets
-            new_xr_list.append(ds)
+    #     Parameters:
+    #         **kwargs: Keyword arguments to be passed to the `isel` method of each DataArray.
+    #     Returns:
+    #         listXarray: A new listXarray with the indexed DataArrays.
+    #     """
+    #     new_xr_list = []
+    #     for ds in self.xr_list:
+    #         try: ds = ds.sel(**kwargs)
+    #         except (ValueError, KeyError): ds = ds 
+    #             # Sometime there may be a dim that is not with the other datasets
+    #         new_xr_list.append(ds)
         
-        return listXarray(new_xr_list, self.key_dim)
+    #     return listXarray(new_xr_list, self.key_dim)
         
     def compute(self):
         '''
@@ -767,8 +913,29 @@ class listXarray():
         
         # Create and return a new ListXArray object with the copied datasets
         return listXarray(copied_datasets, self.key_dim)
-    
-    
+
+    def transpose(self, *args, **kwargs):
+        """
+        Chunk each DataArray in the list.
+
+        Parameters:
+            chunk_dict: Dictionary specifying the chunk sizes for each dimension.
+        Returns:
+            listXarray: A new listXarray with chunked DataArrays.
+        """
+        return listXarray([ds.transpose(*args, **kwargs) for ds in self.xr_list], self.key_dim, self.refkeys)
+        
+    def expand_dims(self, *args, **kwargs):
+        """
+        Chunk each DataArray in the list.
+
+        Parameters:
+            chunk_dict: Dictionary specifying the chunk sizes for each dimension.
+        Returns:
+            listXarray: A new listXarray with chunked DataArrays.
+        """
+        return listXarray([ds.expand_dims(*args, **kwargs) for ds in self.xr_list], self.key_dim, self.refkeys)
+        
     def chunk(self, chunk_dict):
         """
         Chunk each DataArray in the list.
@@ -1053,5 +1220,72 @@ def where(xrlist, true_fill=1, false_fill=0):
         new_xr_list.append(xr.where(ds, true_fill, false_fill))
     return listXarray(new_xr_list, xrlist.key_dim)
 
-        
+
+def _process_args(args, key):
+    """
+    Process and replace `listXarray` instances in the positional arguments with 
+    the corresponding datasets at the specified key.
+
+    Parameters:
+        args (tuple): Positional arguments to process.
+        key (str): The key to extract from each `listXarray` instance.
+
+    Returns:
+        list: A list of arguments with `listXarray` instances replaced by datasets.
+    """
+    new_args = list(args).copy()  # Convert tuple to list to make it mutable
+    for num, arg in enumerate(args):
+        if isinstance(arg, listXarray):
+            # Replace the listXarray instance with the dataset at the specified key
+            new_args[num] = arg[key]
+    return new_args
+
+def _process_kwargs(kwargs, key):
+    """
+    Process and replace `listXarray` instances in the keyword arguments with 
+    the corresponding datasets at the specified key.
+
+    Parameters:
+        kwargs (dict): Keyword arguments to process.
+        key (str): The key to extract from each `listXarray` instance.
+
+    Returns:
+        dict: A dictionary of keyword arguments with `listXarray` instances replaced 
+              by datasets.
+    """
+    new_kwargs = kwargs.copy()  # Create a copy of the kwargs dictionary
+    for name, item in kwargs.items():
+        if isinstance(item, listXarray):
+            # Replace the listXarray instance with the dataset at the specified key
+            new_kwargs[name] = item[key]
+    return new_kwargs
+
+def apply_ufunc(func, xrlist, *args, **kwargs):
+    """
+    Apply a universal function (ufunc) to each dataset in the `listXarray` object 
+    and return a new `listXarray` with the results.
+
+    Parameters:
+        func (function): The function to apply to each dataset.
+        xrlist (listXarray): The listXarray object containing datasets.
+        *args: Positional arguments to pass to `func`.
+        **kwargs: Keyword arguments to pass to `func`.
+
+    Returns:
+        listXarray: A new listXarray with the results of applying `func` to each dataset.
+    """
+    new_xr_list = []
+    for key in xrlist.refkeys:
+        # Apply the function to each dataset at the key
+        new_args = _process_args(args, key) 
+        new_kwargs = _process_kwargs(kwargs, key)  
+        new_ds = xr.apply_ufunc(
+            func,
+            xrlist[key],
+            *new_args, **new_kwargs
+        )
+        new_xr_list.append(new_ds)  # Append the result to the new list
+
+    return listXarray(new_xr_list, xrlist.key_dim, xrlist.refkeys)
+
     
