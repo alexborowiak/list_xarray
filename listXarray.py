@@ -264,7 +264,7 @@ class listXarray:
         # If the key is a string, then this is a reference to the key dim
         if isinstance(key, str):
             arg = np.where(self.refkeys == key)[0][0]
-        # If an int, then this is getting the number in they keydim
+        # If an int, then this is getting the number in they key_dim
         elif isinstance(key, int):
             arg = key
 
@@ -359,6 +359,10 @@ class listXarray:
         if not self.xr_list:
             raise AttributeError(f"{self.__class__.__name__} object has no attribute '{name}'")
 
+
+        if name == self.key_dim:
+            return self.refkeys
+            
         first_ds = self.xr_list[0]
 
         # Check if it's a dimension
@@ -500,9 +504,9 @@ class listXarray:
         return self.__reconcile(self, other, func)
     
     def __or__(self, other):
-        print('s')
-        if not isinstance(other, listXarray):
-            raise ValueError("Both operands must be listXarray instances")
+        # print('s')
+        # if not isinstance(other, listXarray):
+        #     raise ValueError(f"Both operands must be listXarray instances. Got types {type(self)} and {type(other)}")
 
         new_xr_list = []
         # Combine the xr_list and refkeys
@@ -791,7 +795,7 @@ class listXarray:
         Returns:
             listXarray: A new listXarray with resampled DataArrays.
         """
-        return listXarray([ds.resample(time=time) for ds in self.xr_list], None)
+        return listXarray([ds.resample(time=time) for ds in self.xr_list], self.key_dim, self.refkeys)
     
     def _apply_reduction(self, dim, reduction_func):
         """
@@ -815,9 +819,9 @@ class listXarray:
     def mean(self, dim):
         return self._apply_reduction(dim, reduction_func=lambda ds, dim: ds.mean(dim=dim))
     def max(self, dim):
-        return self._apply_reduction(dim, reduction_func=lambda ds, dim: ds.mean(dim=dim))
+        return self._apply_reduction(dim, reduction_func=lambda ds, dim: ds.max(dim=dim))
     def min(self, dim):
-        return self._apply_reduction(dim, reduction_func=lambda ds, dim: ds.mean(dim=dim))
+        return self._apply_reduction(dim, reduction_func=lambda ds, dim: ds.min(dim=dim))
     
     def sum(self, dim):
         return self._apply_reduction(dim, reduction_func=lambda ds, dim: ds.sum(dim=dim))
@@ -1002,7 +1006,7 @@ class listXarray:
         else:
             raise TypeError('Non-valid type for comparison')
             
-    def where(self, bool_xrlist, true_fill=1, false_fill=0):
+    def where(self, bool_xrlist, *args, **kwargs):
         """
         Apply the 'where' function element-wise to the elements of the listXarray.
         Parameters:
@@ -1020,7 +1024,7 @@ class listXarray:
         
         new_xr_list = []
         for ds, bool_ds in zip(self.xr_list, bool_xrlist.xr_list):
-            ds_out = ds.where(bool_ds, true_fill, false_fill)
+            ds_out = ds.where(bool_ds, *args, **kwargs)
             new_xr_list.append(ds_out)
         return listXarray(new_xr_list, self.key_dim)
     
@@ -1204,20 +1208,17 @@ def read_listxarray(fname, *args, **kwargs):
     return listXarray(xr_list, key_dim=key_dim_info['key_dim_name'])
 
             
-def where(xrlist, true_fill=1, false_fill=0):
+def where(xrlist, *args, **kwargs):
     """
     Apply the 'where' function element-wise to the elements of a listXarray instance.
     Parameters:
         xrlist (listXarray): A listXarray instance containing data to be modified.
-        true_fill: Value to fill where the 'xrlist' is True.
-        false_fill: Value to fill where the 'xrlist' is False.
     Returns:
         listXarray: A new instance with elements modified based on the 'where' operation.
     """
-    
     new_xr_list = []
     for key, ds in xrlist:
-        new_xr_list.append(xr.where(ds, true_fill, false_fill))
+        new_xr_list.append(xr.where(ds, *args, **kwargs ))
     return listXarray(new_xr_list, xrlist.key_dim)
 
 
