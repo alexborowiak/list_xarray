@@ -504,9 +504,6 @@ class listXarray:
         return self.__reconcile(self, other, func)
     
     def __or__(self, other):
-        # print('s')
-        # if not isinstance(other, listXarray):
-        #     raise ValueError(f"Both operands must be listXarray instances. Got types {type(self)} and {type(other)}")
 
         new_xr_list = []
         # Combine the xr_list and refkeys
@@ -521,8 +518,6 @@ class listXarray:
         return listXarray(new_xr_list, self.key_dim, self.refkeys)
 
     def __and__(self, other):
-        if not isinstance(other, listXarray):
-            raise ValueError("Both operands must be listXarray instances")
 
         new_xr_list = []
         # Combine the xr_list and refkeys
@@ -816,6 +811,8 @@ class listXarray:
             reduced_list.append(ds_reduced)
             
         return listXarray(reduced_list, self.key_dim)
+    def std(self, dim):
+        return self._apply_reduction(dim, reduction_func=lambda ds, dim: ds.std(dim=dim))
     def mean(self, dim):
         return self._apply_reduction(dim, reduction_func=lambda ds, dim: ds.mean(dim=dim))
     def max(self, dim):
@@ -1218,6 +1215,8 @@ def where(xrlist, *args, **kwargs):
     """
     new_xr_list = []
     for key, ds in xrlist:
+        new_args = _process_args(arg, key)
+        new_kwargs = _process_kwargs(kwargs, key)
         new_xr_list.append(xr.where(ds, *args, **kwargs ))
     return listXarray(new_xr_list, xrlist.key_dim)
 
